@@ -1,118 +1,105 @@
-import pandas as pd
-from kafka import KafkaProducer
-import json
-import time
 import os
-import sys
+import pandas as pd
+import time
+from hdfs import InsecureClient
+from kafka import KafkaProducer
+from kafka.admin import KafkaAdminClient, NewTopic
+import json
 
-# -----------------------------
-# Cấu hình
-# -----------------------------
-folder_hdfs = '/xray/test/'          # path HDFS tham chiếu trong metadata
-kafka_topic = 'xray_metadata_test'   # topic Kafka
-kafka_server = 'kafka:9092'          # Kafka server
-sleep_time = 30                       # giây giữa các ảnh
+# ---------- Kafka config ----------
+KAFKA_SERVER = 'kafka:9092'
+TOPIC = 'xray_metadata'
 
-# -----------------------------
-# Thư mục dữ liệu CSV trong Docker
-# -----------------------------
-data_folder = '/app/data'
+admin_client = KafkaAdminClient(bootstrap_servers=KAFKA_SERVER, client_id='setup')
+if TOPIC not in admin_client.list_topics():
+    topic = NewTopic(name=TOPIC, num_partitions=1, replication_factor=1)
+    admin_client.create_topics([topic])
+    print(f"[DEBUG] Đã tạo topic {TOPIC} tự động")
+else:
+    print(f"[DEBUG] Topic {TOPIC} đã tồn tại")
+admin_client.close()
 
-# -----------------------------
-# Load CSV
-# -----------------------------
-try:
-    captions = pd.read_csv(os.path.join(data_folder, 'test_captions.csv'))
-    concepts_manual = pd.read_csv(os.path.join(data_folder, 'test_concepts_manual.csv'))
-    license_info = pd.read_csv(os.path.join(data_folder, 'license_information.csv'))
-    cui_map = pd.read_csv(os.path.join(data_folder, 'cui_mapping.csv'))
-except Exception as e:
-    print(f"[Error] Không load được CSV: {e}")
-    sys.exit(1)
+producer = KafkaProducer(
+    bootstrap_servers=[KAFKA_SERVER],
+    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+)
 
-# Strip khoảng trắng ở tên cột
-captions.columns = captions.columns.str.strip()
-concepts_manual.columns = concepts_manual.columns.str.strip()
-license_info.columns = license_info.columns.str.strip()
-cui_map.columns = cui_map.columns.str.strip()
+# ---------- HDFS config ----------
+HDFS_URL = 'http://namenode:9870'
+HDFS_BASE_DIR = "/xray/images"
+hdfs_client = InsecureClient(HDFS_URL)
 
-# Lọc chỉ test
-captions_test = captions[captions['ID'].str.startswith('ROCOv2_2023_test')]
+if not hdfs_client.status(HDFS_BASE_DIR, strict=False):
+    hdfs_client.makedirs(HDFS_BASE_DIR)
+    print(f"[DEBUG] Tạo folder HDFS: {HDFS_BASE_DIR}")
+else:
+    print(f"[DEBUG] Folder HDFS {HDFS_BASE_DIR} đã tồn tại")
 
-# -----------------------------
-# Tạo Kafka producer
-# -----------------------------
-try:
-    producer = KafkaProducer(
-        bootstrap_servers=kafka_server,
-        value_serializer=lambda v: json.dumps(v).encode('utf-8')
-    )
-except Exception as e:
-    print(f"[Error] Không kết nối Kafka: {e}")
-    sys.exit(1)
+# ---------- Local data ----------
+LOCAL_IMAGES_DIR = "/app/data/images"
+PATIENT_CSV = "/app/data/patient_subset.csv"
+BATCH_SIZE = 5
+INTERVAL_SEC = 10
 
-# -----------------------------
-# Gửi metadata
-# -----------------------------
-uploaded = set()  # track ảnh đã gửi
+# ---------- Load CSV ----------
+print("[DEBUG] Đang load CSV...")
+patient_csv = pd.read_csv(PATIENT_CSV)
+print(f"[DEBUG] patient_csv: {len(patient_csv)} rows")
 
-for idx, row in captions_test.iterrows():
-    try:
-        image_id = row['ID']
-        if image_id in uploaded:
+# Chuẩn bị id (bỏ đuôi .png)
+patient_csv['id'] = patient_csv['Image Index']
+
+# Danh sách ảnh từ patient_csv
+image_list = patient_csv['id'].tolist()
+num_images = len(image_list)
+batch_num = 1
+
+# ---------- Gửi batch ----------
+for start_idx in range(0, num_images, BATCH_SIZE):
+    end_idx = min(start_idx + BATCH_SIZE, num_images)
+    batch_images = image_list[start_idx:end_idx]
+    print(f"[DEBUG] Batch {batch_num:03d} - preparing {len(batch_images)} images")
+
+    # Tạo folder batch trên HDFS
+    hdfs_batch_dir = f"{HDFS_BASE_DIR}/batch_{batch_num:03d}"
+    if not hdfs_client.status(hdfs_batch_dir, strict=False):
+        hdfs_client.makedirs(hdfs_batch_dir)
+        print(f"[DEBUG] Tạo folder batch HDFS: {hdfs_batch_dir}")
+    else:
+        print(f"[DEBUG] Folder batch HDFS đã tồn tại: {hdfs_batch_dir}")
+
+    # Upload ảnh vào HDFS
+    for img_name in batch_images:
+        local_path = os.path.join(LOCAL_IMAGES_DIR, img_name)
+        if not os.path.exists(local_path):
+            print(f"[WARN] Ảnh {local_path} không tồn tại, bỏ qua")
             continue
+        hdfs_path = f"{hdfs_batch_dir}/{img_name}"
+        hdfs_client.upload(hdfs_path, local_path, overwrite=True)
+        print(f"[DEBUG] Upload {local_path} -> {hdfs_path}")
 
-        # Caption
-        caption_text = row['Caption']
+    # Lấy metadata từ patient_csv
+    batch_meta = patient_csv[patient_csv['id'].isin(batch_images)].copy()
 
-        # License
-        license_row = license_info[license_info['ID'] == image_id]
-        if license_row.empty:
-            license_text = "Unknown"
-            link = ""
-            print(f"[Warning] Không tìm thấy license cho {image_id}", flush=True)
-        else:
-            license_text = license_row.iloc[0]['Attribution']
-            link = license_row.iloc[0]['Link']
+    HDFS_PREFIX = "hdfs://namenode:9000"
 
-        # Concepts manual
-        concept_row = concepts_manual[concepts_manual['ID'] == image_id]
-        concepts_list = []
+    # Thêm HDFS_PREFIX vào hdfs_path
+    batch_meta['hdfs_path'] = batch_meta['id'].apply(
+        lambda x: f"{HDFS_PREFIX}{hdfs_batch_dir}/{x}"
+    )
 
-        if concept_row.empty:
-            print(f"[Warning] Không tìm thấy concept cho {image_id}", flush=True)
-        else:
-            # tách nhiều CUI nếu có
-            cui_str = concept_row.iloc[0]['CUIs']
-            cui_list = [c.strip() for c in str(cui_str).split(';') if c.strip()]
-            for cui in cui_list:
-                name_series = cui_map[cui_map['CUI'] == cui]['Canonical name']
-                name = name_series.values[0] if not name_series.empty else "Unknown"
-                if name == "Unknown":
-                    print(f"[Warning] Không tìm thấy CUI trong map: {cui}", flush=True)
-                concepts_list.append({"CUI": cui, "name": name})
 
-        # Metadata
-        metadata = {
-            "image_id": image_id,
-            "hdfs_path": f"{folder_hdfs}{image_id}.dcm",
-            "caption": caption_text,
-            "concepts": concepts_list,
-            "license": license_text,
-            "link": link,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
+    # Gửi metadata vào Kafka
+    meta_list = batch_meta.to_dict(orient='records')
+    for record in meta_list:
+        producer.send(TOPIC, record)
+        print(f"[DEBUG] Sent metadata to Kafka: {record['id']}")
 
-        # Gửi Kafka
-        producer.send(kafka_topic, metadata)
-        producer.flush()
-        uploaded.add(image_id)
-        print(f"[Info] Đã gửi metadata cho {image_id}", flush=True)
+    producer.flush()
+    print(f"[INFO] Batch {batch_num:03d}: {len(batch_images)} ảnh -> HDFS, metadata gửi Kafka")
 
-        # Delay giữa các ảnh
-        time.sleep(sleep_time)
+    batch_num += 1
+    if end_idx < num_images:
+        time.sleep(INTERVAL_SEC)
 
-    except Exception as e:
-        print(f"[Error] Lỗi khi xử lý {row.get('ID', 'Unknown')}: {e}", flush=True)
-
-print("[Info] Đã gửi hết tất cả metadata test.")
+print("[INFO] Hoàn tất gửi tất cả batch ảnh và metadata vào HDFS và Kafka!")

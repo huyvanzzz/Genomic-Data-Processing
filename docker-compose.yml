@@ -17,10 +17,15 @@ services:
       - "9870:9870"
     networks:
       - genome_hadoop_net
+    healthcheck:
+      test: ["CMD", "hdfs", "dfsadmin", "-safemode", "get"]
+      interval: 5s
+      retries: 10
+      timeout: 10s
 
-  datanode:
+  datanode1:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: datanode
+    container_name: datanode1
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
       - HDFS_CONF_dfs_datanode_data_dir=file:///hadoop/dfs/data
@@ -28,12 +33,44 @@ services:
     depends_on:
       - namenode
     volumes:
-      - hadoop_datanode:/hadoop/dfs/data
-      - ./data:/data
+      - hadoop_datanode1:/hadoop/dfs/data
     ports:
       - "9864:9864"
     networks:
       - genome_hadoop_net
+
+  datanode2:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode2
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - HDFS_CONF_dfs_datanode_data_dir=file:///hadoop/dfs/data
+      - CLUSTER_NAME=genome_hadoop
+    depends_on:
+      - namenode
+    volumes:
+      - hadoop_datanode2:/hadoop/dfs/data
+    ports:
+      - "9865:9864"
+    networks:
+      - genome_hadoop_net
+
+  datanode3:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode3
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:8020
+      - HDFS_CONF_dfs_datanode_data_dir=file:///hadoop/dfs/data
+      - CLUSTER_NAME=genome_hadoop
+    depends_on:
+      - namenode
+    volumes:
+      - hadoop_datanode3:/hadoop/dfs/data
+    ports:
+      - "9866:9864"
+    networks:
+      - genome_hadoop_net
+
 
   # ===== Spark =====
   spark-master:
@@ -62,23 +99,7 @@ services:
     networks:
       - genome_hadoop_net
 
-  pyspark-notebook:
-    image: jupyter/pyspark-notebook
-    container_name: pyspark-notebook
-    ports:
-      - "8888:8888"
-      - "4040:4040"
-    volumes:
-      - ./notebooks:/home/jovyan
-    environment:
-      - PYSPARK_PYTHON=python3
-    depends_on:
-      - spark-master
-    networks:
-      - genome_hadoop_net
-
   # ===== Kafka & Zookeeper =====
-    # ===== Zookeeper =====
   zookeeper:
     image: wurstmeister/zookeeper:latest
     container_name: zookeeper
@@ -89,7 +110,6 @@ services:
     networks:
       - genome_hadoop_net
 
-  # ===== Kafka =====
   kafka:
     image: wurstmeister/kafka:latest
     container_name: kafka
@@ -105,6 +125,11 @@ services:
       - "9092:9092"
     networks:
       - genome_hadoop_net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      interval: 5s
+      retries: 5
+      timeout: 5s
 
   # ===== Hive Metastore =====
   hive-metastore:
@@ -136,22 +161,29 @@ services:
       - namenode
     networks:
       - genome_hadoop_net
-  metadata-sender:
+
+  # ===== Metadata Sender + Spark Streaming =====
+  spark_streaming:
     build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: metadata_sender
+      context: . 
+      dockerfile: Dockerfile 
+    container_name: spark_streaming
     volumes:
-      - ./data:/app/data   # mount folder CSV và test images
+      - ./data:/app/data
     networks:
       - genome_hadoop_net
     depends_on:
-      - kafka
-
+      namenode:
+        condition: service_healthy
+      kafka:
+        condition: service_started
 
 volumes:
   hadoop_namenode:
-  hadoop_datanode:
+  hadoop_datanode1:
+  hadoop_datanode2:
+  hadoop_datanode3:
+
 
 networks:
   genome_hadoop_net:
