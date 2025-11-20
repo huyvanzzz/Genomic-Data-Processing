@@ -689,13 +689,3 @@ print(df.head())
 "
 ```
 
-**10) Các bước tiếp theo / Gợi ý**
-- Thêm Flask/FastAPI wrapper nhẹ cho predictor để tránh import thư viện ML nặng vào Spark executors.
-- Thêm unit tests và script nhỏ để validate kết nối HDFS/Kafka.
-- Thêm `requirements-dev.txt` và `Makefile` hoặc shell scripts để đơn giản hóa các tác vụ thường gặp.
-- Cài đặt monitoring với Prometheus + Grafana để giám sát real-time.
-- Implement data validation và quality checks trước khi xử lý.
-- Thêm retry logic và error handling cho production.
-
----
-**Cần hỗ trợ thêm?** Tôi có thể: 1) tạo helper scripts để khởi động stack và upload dữ liệu mẫu, 2) thêm REST wrapper nhỏ cho predictor, hoặc 3) chuẩn bị CI/packaging.
