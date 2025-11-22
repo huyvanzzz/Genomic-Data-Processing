@@ -25,7 +25,7 @@ Hệ thống phân tích ảnh X-quang ngực tự động sử dụng Deep Lear
 
 ```bash
 # 1. Clone repository
-git clone <repository-url>
+git clone https://github.com/huyvanzzz/Genomic-Data-Processing
 cd Genomic-Data-Processing
 
 # 2. Khởi động toàn bộ hệ thống
